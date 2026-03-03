@@ -1,0 +1,108 @@
+{
+  "last_node_id": 4,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [80, 160],
+      "size": [320, 320],
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [1]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png",
+        "image"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "PTQuadInitNode",
+      "pos": [470, 160],
+      "size": [420, 380],
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "sam3_box_prompt",
+          "type": "STRING",
+          "links": [2]
+        },
+        {
+          "name": "quad_points_px_json",
+          "type": "STRING",
+          "links": [3]
+        },
+        {
+          "name": "debug_image",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PTQuadInitNode"
+      },
+      "widgets_values": [
+        "[[128,72],[512,80],[500,320],[120,300]]",
+        true,
+        true
+      ]
+    },
+    {
+      "id": 3,
+      "type": "PreviewAny",
+      "pos": [900, 120],
+      "size": [260, 140],
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "value",
+          "type": "*",
+          "link": 2
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      }
+    },
+    {
+      "id": 4,
+      "type": "PreviewAny",
+      "pos": [900, 300],
+      "size": [260, 140],
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "value",
+          "type": "*",
+          "link": 3
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      }
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "IMAGE"],
+    [2, 2, 0, 3, 0, "STRING"],
+    [3, 2, 1, 4, 0, "STRING"]
+  ]
+}

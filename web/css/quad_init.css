@@ -1,0 +1,10 @@
+.pt-quad-init-preview {
+  position: relative;
+  width: 100%;
+}
+
+.pt-quad-init-preview canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
