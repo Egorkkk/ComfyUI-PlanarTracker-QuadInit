@@ -17,6 +17,10 @@ function debugLog(message, payload = null) {
   }
 }
 
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
 function matchTargetValue(value) {
   if (!value) {
     return false;
@@ -95,36 +99,238 @@ function attachDomWidget(node, container) {
   return null;
 }
 
-function drawPlaceholder(node) {
-  const state = node.__pt_nodes2_dom;
-  if (!state || !state.ctx) {
-    return;
+class PTQuadEditor {
+  constructor(node, state) {
+    this.node = node;
+    this.state = state;
+    this.canvas = state.canvas;
+    this.ctx = state.ctx;
+
+    this.width = 1;
+    this.height = 1;
+    this.dpr = 1;
+
+    this.image = null;
+    this.imageRect = { x: 0, y: 0, w: 1, h: 1 };
+
+    this.quad = [
+      [0.2, 0.2],
+      [0.8, 0.2],
+      [0.8, 0.8],
+      [0.2, 0.8],
+    ];
+
+    this.activeHandle = -1;
+    this.dragMode = null;
   }
 
-  const { ctx, width, height } = state;
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#1c1c1c";
-  ctx.fillRect(0, 0, width, height);
+  // TODO: hook point for future preview integration, e.g. from /view URL.
+  setImage(url) {
+    if (!url) {
+      this.image = null;
+      this.draw();
+      return;
+    }
 
-  const step = 16;
-  for (let y = 0; y < height; y += step) {
-    for (let x = 0; x < width; x += step) {
-      const isDark = ((x / step) + (y / step)) % 2 === 0;
-      ctx.fillStyle = isDark ? "#222" : "#2c2c2c";
-      ctx.fillRect(x, y, step, step);
+    const img = new Image();
+    img.onload = () => {
+      this.image = img;
+      this.draw();
+    };
+    img.onerror = () => {
+      this.image = null;
+      this.draw();
+    };
+    img.src = url;
+  }
+
+  setQuadNormalized(points) {
+    if (!Array.isArray(points) || points.length !== 4) {
+      return;
+    }
+
+    this.quad = points.map(([x, y]) => [
+      clamp(Number(x) || 0, 0, 1),
+      clamp(Number(y) || 0, 0, 1),
+    ]);
+
+    this.draw();
+  }
+
+  resize(cssWidth, cssHeight, dpr) {
+    this.width = cssWidth;
+    this.height = cssHeight;
+    this.dpr = dpr;
+
+    this.canvas.width = Math.max(1, Math.round(cssWidth * dpr));
+    this.canvas.height = Math.max(1, Math.round(cssHeight * dpr));
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    this.draw();
+  }
+
+  computeImageRect() {
+    const w = this.width;
+    const h = this.height;
+
+    if (!this.image || !this.image.naturalWidth || !this.image.naturalHeight) {
+      this.imageRect = { x: 0, y: 0, w, h };
+      return;
+    }
+
+    const iw = this.image.naturalWidth;
+    const ih = this.image.naturalHeight;
+
+    const scale = Math.min(w / Math.max(1, iw), h / Math.max(1, ih));
+    const drawW = iw * scale;
+    const drawH = ih * scale;
+
+    this.imageRect = {
+      x: (w - drawW) * 0.5,
+      y: (h - drawH) * 0.5,
+      w: drawW,
+      h: drawH,
+    };
+  }
+
+  normToCanvas(point) {
+    const r = this.imageRect;
+    return [
+      r.x + point[0] * r.w,
+      r.y + point[1] * r.h,
+    ];
+  }
+
+  canvasToNorm(x, y) {
+    const r = this.imageRect;
+    if (r.w <= 0 || r.h <= 0) {
+      return [0.5, 0.5];
+    }
+
+    const nx = clamp((x - r.x) / r.w, 0, 1);
+    const ny = clamp((y - r.y) / r.h, 0, 1);
+    return [nx, ny];
+  }
+
+  distancePointToSegment(px, py, ax, ay, bx, by) {
+    const abx = bx - ax;
+    const aby = by - ay;
+    const apx = px - ax;
+    const apy = py - ay;
+    const ab2 = (abx * abx) + (aby * aby);
+
+    if (ab2 <= 1e-8) {
+      return Math.hypot(px - ax, py - ay);
+    }
+
+    const t = clamp(((apx * abx) + (apy * aby)) / ab2, 0, 1);
+    const qx = ax + (abx * t);
+    const qy = ay + (aby * t);
+    return Math.hypot(px - qx, py - qy);
+  }
+
+  hitTest(x, y) {
+    const handleRadius = 10;
+
+    const points = this.quad.map((p) => this.normToCanvas(p));
+    for (let i = 0; i < points.length; i += 1) {
+      const [hx, hy] = points[i];
+      if (Math.hypot(x - hx, y - hy) <= handleRadius) {
+        return { type: "handle", index: i };
+      }
+    }
+
+    const edgeThreshold = 8;
+    for (let i = 0; i < points.length; i += 1) {
+      const [ax, ay] = points[i];
+      const [bx, by] = points[(i + 1) % points.length];
+      if (this.distancePointToSegment(x, y, ax, ay, bx, by) <= edgeThreshold) {
+        return { type: "edge", index: i };
+      }
+    }
+
+    return { type: "none", index: -1 };
+  }
+
+  drawCheckerboard() {
+    const { ctx, width, height } = this;
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#1c1c1c";
+    ctx.fillRect(0, 0, width, height);
+
+    const step = 16;
+    for (let y = 0; y < height; y += step) {
+      for (let x = 0; x < width; x += step) {
+        const dark = ((x / step) + (y / step)) % 2 === 0;
+        ctx.fillStyle = dark ? "#222" : "#2c2c2c";
+        ctx.fillRect(x, y, step, step);
+      }
     }
   }
 
-  ctx.strokeStyle = "rgba(255,255,255,0.15)";
-  ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
-  ctx.fillStyle = "rgba(255,255,255,0.65)";
-  ctx.font = "12px monospace";
-  ctx.fillText("PT Quad Editor (Nodes 2.0)", 10, 20);
+  drawImageAndFrame() {
+    const { ctx } = this;
+    this.computeImageRect();
+
+    if (this.image) {
+      const r = this.imageRect;
+      ctx.drawImage(this.image, r.x, r.y, r.w, r.h);
+    }
+
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.strokeRect(0.5, 0.5, this.width - 1, this.height - 1);
+  }
+
+  drawQuad() {
+    const { ctx } = this;
+    const points = this.quad.map((p) => this.normToCanvas(p));
+
+    ctx.save();
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+
+    ctx.strokeStyle = "rgba(64,255,170,0.95)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    points.forEach(([x, y], i) => {
+      if (i === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    });
+    ctx.closePath();
+    ctx.stroke();
+
+    points.forEach(([x, y], i) => {
+      const isActive = this.activeHandle === i;
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.fillStyle = isActive ? "#ffffff" : "#ff6a5f";
+      ctx.strokeStyle = "rgba(0,0,0,0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.fill();
+      ctx.stroke();
+    });
+
+    ctx.restore();
+  }
+
+  draw() {
+    this.drawCheckerboard();
+    this.drawImageAndFrame();
+    this.drawQuad();
+
+    this.ctx.fillStyle = "rgba(255,255,255,0.65)";
+    this.ctx.font = "12px monospace";
+    this.ctx.fillText("PT Quad Editor (Nodes 2.0)", 10, 20);
+  }
 }
 
 function resizeCanvas(node) {
   const state = node.__pt_nodes2_dom;
-  if (!state) {
+  if (!state || !state.editor) {
     return;
   }
 
@@ -133,22 +339,8 @@ function resizeCanvas(node) {
   const cssHeight = Math.max(1, Math.round(rect.height));
   const dpr = Math.max(1, window.devicePixelRatio || 1);
 
-  const targetW = Math.round(cssWidth * dpr);
-  const targetH = Math.round(cssHeight * dpr);
-
-  if (state.canvas.width !== targetW || state.canvas.height !== targetH) {
-    state.canvas.width = targetW;
-    state.canvas.height = targetH;
-  }
-
-  state.width = cssWidth;
-  state.height = cssHeight;
-  state.dpr = dpr;
-
-  state.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   debugLog("resize", { cssWidth, cssHeight, dpr });
-
-  drawPlaceholder(node);
+  state.editor.resize(cssWidth, cssHeight, dpr);
 }
 
 function setupNodes2Widget(node) {
@@ -168,11 +360,11 @@ function setupNodes2Widget(node) {
     canvas,
     ctx,
     widget,
-    width: 1,
-    height: 1,
-    dpr: 1,
     resizeObserver: null,
+    editor: null,
   };
+
+  node.__pt_nodes2_dom.editor = new PTQuadEditor(node, node.__pt_nodes2_dom);
 
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => {
