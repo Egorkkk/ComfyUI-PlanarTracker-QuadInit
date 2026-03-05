@@ -4,7 +4,8 @@ const DEBUG = true;
 const TARGET_INTERNAL = "PTQuadInitNode";
 const TARGET_DISPLAY = "PT Quad Init";
 const DOM_WIDGET_NAME = "pt_quad_editor_nodes2";
-const DOM_WIDGET_HEIGHT = 240;
+const DOM_WIDGET_WIDTH = 1280;
+const DOM_WIDGET_HEIGHT = 720;
 const QUAD_WIDGET_NAME = "quad_json";
 
 function debugLog(message, payload = null) {
@@ -103,17 +104,38 @@ function serializeQuadForWidget(quad) {
   return JSON.stringify({ pts });
 }
 
+function markNodeChanged(node) {
+  node?.setDirtyCanvas?.(true, true);
+  node?.graph?.setDirtyCanvas?.(true, true);
+  node?.graph?.change?.();
+  app?.graph?.setDirtyCanvas?.(true, true);
+  app?.graph?.change?.();
+}
+
 function writeQuadToWidget(node, quad) {
   const widget = ensureQuadWidget(node);
   if (!widget) {
-    return;
+    return { changed: false, value: "", reason: "missing_widget" };
   }
 
   const value = serializeQuadForWidget(quad);
+  const previous = String(widget.value ?? "");
+  const changed = previous !== value;
+  if (!changed) {
+    if (DEBUG) {
+      debugLog("sync quad_json", { changed: false, value: `${value.slice(0, 96)}${value.length > 96 ? "..." : ""}` });
+    }
+    return { changed: false, value, reason: "same_value" };
+  }
+
   widget.value = value;
   if (typeof widget.callback === "function") {
     widget.callback(value);
   }
+  if (DEBUG) {
+    debugLog("sync quad_json", { changed: true, value: `${value.slice(0, 96)}${value.length > 96 ? "..." : ""}` });
+  }
+  return { changed: true, value, reason: "updated" };
 }
 
 function normalizeParsedQuad(points) {
@@ -171,28 +193,57 @@ function restoreQuadFromWidget(node, editor) {
   const restored = parseQuadWidgetValue(rawValue);
 
   if (restored) {
-    editor.setQuadNormalized(restored);
+    editor.setNormalizedQuad(restored);
+    if (DEBUG) {
+      debugLog("restore quad_json", { status: "parsed", pts: restored });
+    }
     return;
   }
 
-  editor.setQuadNormalized(defaultQuadNormalized());
-  writeQuadToWidget(node, editor.quad);
+  const fallback = defaultQuadNormalized();
+  editor.setNormalizedQuad(fallback);
+  if (DEBUG) {
+    debugLog("restore quad_json", {
+      status: "fallback_default",
+      reason: rawValue.trim() ? "invalid_json_or_shape" : "empty_value",
+    });
+  }
+  const syncResult = writeQuadToWidget(node, editor.getNormalizedQuad());
+  if (syncResult?.changed) {
+    markNodeChanged(node);
+  }
 }
 
 function createDomContainer() {
   const container = document.createElement("div");
   container.style.position = "relative";
-  container.style.width = "100%";
+  container.style.width = `${DOM_WIDGET_WIDTH}px`;
+  container.style.minWidth = `${DOM_WIDGET_WIDTH}px`;
+  container.style.maxWidth = `${DOM_WIDGET_WIDTH}px`;
   container.style.height = `${DOM_WIDGET_HEIGHT}px`;
   container.style.minHeight = `${DOM_WIDGET_HEIGHT}px`;
   container.style.maxHeight = `${DOM_WIDGET_HEIGHT}px`;
+  container.style.padding = "0";
+  container.style.margin = "0";
+  container.style.border = "0";
+  container.style.boxSizing = "border-box";
+  container.style.transform = "none";
   container.style.overflow = "hidden";
   container.style.borderRadius = "6px";
   container.style.background = "#181818";
 
   const canvas = document.createElement("canvas");
-  canvas.style.width = "100%";
-  canvas.style.height = "100%";
+  canvas.style.width = `${DOM_WIDGET_WIDTH}px`;
+  canvas.style.height = `${DOM_WIDGET_HEIGHT}px`;
+  canvas.style.minWidth = `${DOM_WIDGET_WIDTH}px`;
+  canvas.style.maxWidth = `${DOM_WIDGET_WIDTH}px`;
+  canvas.style.minHeight = `${DOM_WIDGET_HEIGHT}px`;
+  canvas.style.maxHeight = `${DOM_WIDGET_HEIGHT}px`;
+  canvas.style.padding = "0";
+  canvas.style.margin = "0";
+  canvas.style.border = "0";
+  canvas.style.boxSizing = "border-box";
+  canvas.style.transform = "none";
   canvas.style.display = "block";
   canvas.style.touchAction = "none";
 
@@ -224,7 +275,7 @@ function attachDomWidget(node, container) {
     });
 
     if (widget && typeof widget.computeSize === "function") {
-      widget.computeSize = (width) => [width, DOM_WIDGET_HEIGHT];
+      widget.computeSize = () => [DOM_WIDGET_WIDTH, DOM_WIDGET_HEIGHT];
     }
 
     return widget;
@@ -236,8 +287,8 @@ function attachDomWidget(node, container) {
     node.addCustomWidget({
       name: DOM_WIDGET_NAME,
       type: "pt-dom-fallback",
-      computeSize(width) {
-        return [width, DOM_WIDGET_HEIGHT];
+      computeSize() {
+        return [DOM_WIDGET_WIDTH, DOM_WIDGET_HEIGHT];
       },
       draw() {},
     });
@@ -267,6 +318,9 @@ class PTQuadEditor {
     this.dragMode = null;
     this.dragState = null;
     this.pointerId = null;
+    this.pointerDebugPos = null;
+    this.lastPointerLogTs = 0;
+    this.lastRectLogTs = 0;
 
     this.onChange = null;
 
@@ -327,7 +381,11 @@ class PTQuadEditor {
     img.src = url;
   }
 
-  setQuadNormalized(points) {
+  getNormalizedQuad() {
+    return this.quad.map(([x, y]) => [x, y]);
+  }
+
+  setNormalizedQuad(points) {
     if (!Array.isArray(points) || points.length !== 4) {
       return;
     }
@@ -338,6 +396,27 @@ class PTQuadEditor {
     ]);
 
     this.draw();
+  }
+
+  // Backward-compatible alias.
+  setQuadNormalized(points) {
+    this.setNormalizedQuad(points);
+  }
+
+  syncToNodeWidget() {
+    const result = writeQuadToWidget(this.node, this.getNormalizedQuad());
+    if (result?.changed) {
+      this.markChanged();
+    }
+    return result;
+  }
+
+  restoreFromNodeWidget() {
+    restoreQuadFromWidget(this.node, this);
+  }
+
+  markChanged() {
+    markNodeChanged(this.node);
   }
 
   resize(cssWidth, cssHeight, dpr) {
@@ -361,6 +440,7 @@ class PTQuadEditor {
     this.canvas.addEventListener("pointerleave", () => {
       if (!this.dragMode) {
         this.hoverHandle = -1;
+        this.pointerDebugPos = null;
         this.setCursor("crosshair");
         this.draw();
       }
@@ -369,9 +449,27 @@ class PTQuadEditor {
 
   getCanvasCoords(event) {
     const rect = this.canvas.getBoundingClientRect();
+    const safeWidth = rect.width > 0 ? rect.width : DOM_WIDGET_WIDTH;
+    const safeHeight = rect.height > 0 ? rect.height : DOM_WIDGET_HEIGHT;
+    const scaleX = DOM_WIDGET_WIDTH / safeWidth;
+    const scaleY = DOM_WIDGET_HEIGHT / safeHeight;
+
+    if (DEBUG) {
+      const now = performance.now();
+      if ((now - this.lastRectLogTs) > 200) {
+        debugLog("pointer rect->logical", {
+          rectW: Number(rect.width.toFixed(2)),
+          rectH: Number(rect.height.toFixed(2)),
+          scaleX: Number(scaleX.toFixed(4)),
+          scaleY: Number(scaleY.toFixed(4)),
+        });
+        this.lastRectLogTs = now;
+      }
+    }
+
     return {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
+      x: (event.clientX - rect.left) * scaleX,
+      y: (event.clientY - rect.top) * scaleY,
     };
   }
 
@@ -490,6 +588,7 @@ class PTQuadEditor {
     event.preventDefault();
 
     const { x, y } = this.getCanvasCoords(event);
+    this.pointerDebugPos = { x, y };
     const hit = this.hitTest(x, y);
 
     debugLog("pointer events", { phase: "down", hit, x, y });
@@ -522,6 +621,18 @@ class PTQuadEditor {
 
   onPointerMove(event) {
     const { x, y } = this.getCanvasCoords(event);
+    this.pointerDebugPos = { x, y };
+
+    if (DEBUG) {
+      const now = performance.now();
+      if ((now - this.lastPointerLogTs) > 60) {
+        debugLog("pointer coords", {
+          x: Number(x.toFixed(2)),
+          y: Number(y.toFixed(2)),
+        });
+        this.lastPointerLogTs = now;
+      }
+    }
 
     if (this.dragMode && this.pointerId === event.pointerId) {
       event.preventDefault();
@@ -565,6 +676,8 @@ class PTQuadEditor {
     if (this.pointerId === event.pointerId) {
       event.preventDefault();
       this.canvas.releasePointerCapture(event.pointerId);
+      const { x, y } = this.getCanvasCoords(event);
+      this.pointerDebugPos = { x, y };
       this.stopDrag();
       debugLog("pointer events", { phase: "up" });
     }
@@ -646,9 +759,25 @@ class PTQuadEditor {
   }
 
   draw() {
+    // Keep CSS-space drawing with DPR transform reset every frame.
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.drawCheckerboard();
     this.drawImageAndFrame();
     this.drawQuad();
+
+    if (DEBUG && this.pointerDebugPos) {
+      const { x, y } = this.pointerDebugPos;
+      this.ctx.save();
+      this.ctx.strokeStyle = "rgba(255,64,64,0.95)";
+      this.ctx.lineWidth = 1;
+      this.ctx.beginPath();
+      this.ctx.moveTo(x - 8, y);
+      this.ctx.lineTo(x + 8, y);
+      this.ctx.moveTo(x, y - 8);
+      this.ctx.lineTo(x, y + 8);
+      this.ctx.stroke();
+      this.ctx.restore();
+    }
 
     this.ctx.fillStyle = "rgba(255,255,255,0.65)";
     this.ctx.font = "12px monospace";
@@ -662,7 +791,7 @@ function resizeCanvas(node) {
     return;
   }
 
-  const cssWidth = Math.max(1, Math.round(state.container.clientWidth || state.container.getBoundingClientRect().width));
+  const cssWidth = DOM_WIDGET_WIDTH;
   const cssHeight = DOM_WIDGET_HEIGHT;
   const dpr = Math.max(1, window.devicePixelRatio || 1);
 
@@ -695,12 +824,12 @@ function setupNodes2Widget(node) {
   };
 
   const editor = new PTQuadEditor(node, node.__pt_nodes2_dom);
-  editor.setOnChange((quad) => {
-    writeQuadToWidget(node, quad);
+  editor.setOnChange(() => {
+    editor.syncToNodeWidget();
   });
   node.__pt_nodes2_dom.editor = editor;
 
-  restoreQuadFromWidget(node, editor);
+  editor.restoreFromNodeWidget();
 
   resetButton.addEventListener("click", (event) => {
     event.preventDefault();
