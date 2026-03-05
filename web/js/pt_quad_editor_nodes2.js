@@ -5,6 +5,7 @@ const TARGET_INTERNAL = "PTQuadInitNode";
 const TARGET_DISPLAY = "PT Quad Init";
 const DOM_WIDGET_NAME = "pt_quad_editor_nodes2";
 const DOM_WIDGET_HEIGHT = 240;
+const QUAD_WIDGET_NAME = "quad_json";
 
 function debugLog(message, payload = null) {
   if (!DEBUG) {
@@ -47,6 +48,63 @@ function isTargetNodeInstance(node) {
     node?.title,
     node?.constructor?.type,
   ].some(matchTargetValue);
+}
+
+function getQuadWidget(node) {
+  return node.widgets?.find((w) => w.name === QUAD_WIDGET_NAME) || null;
+}
+
+function hideWidgetForNodes2(node, widget, suffix = "") {
+  if (!widget || widget.__pt_nodes2_hidden) {
+    return;
+  }
+
+  widget.__pt_nodes2_hidden = true;
+  widget.origType = widget.type;
+  widget.origComputeSize = widget.computeSize;
+  widget.type = `converted-widget${suffix}`;
+  widget.computeSize = () => [0, -4];
+  widget.hidden = true;
+
+  if (widget.element) {
+    widget.element.style.display = "none";
+    widget.element.style.visibility = "hidden";
+  }
+}
+
+function ensureQuadWidget(node) {
+  let widget = getQuadWidget(node);
+
+  if (!widget && typeof node.addWidget === "function") {
+    widget = node.addWidget("text", QUAD_WIDGET_NAME, "", () => {});
+  }
+
+  if (widget) {
+    hideWidgetForNodes2(node, widget);
+  }
+
+  return widget;
+}
+
+function serializeQuadForWidget(quad) {
+  const pts = quad.map(([x, y]) => [
+    Number(clamp(x, 0, 1).toFixed(6)),
+    Number(clamp(y, 0, 1).toFixed(6)),
+  ]);
+  return JSON.stringify({ pts });
+}
+
+function writeQuadToWidget(node, quad) {
+  const widget = ensureQuadWidget(node);
+  if (!widget) {
+    return;
+  }
+
+  const value = serializeQuadForWidget(quad);
+  widget.value = value;
+  if (typeof widget.callback === "function") {
+    widget.callback(value);
+  }
 }
 
 function createDomContainer() {
@@ -121,7 +179,24 @@ class PTQuadEditor {
     ];
 
     this.activeHandle = -1;
+    this.hoverHandle = -1;
     this.dragMode = null;
+    this.dragState = null;
+    this.pointerId = null;
+
+    this.onChange = null;
+
+    this.bindPointerEvents();
+  }
+
+  setOnChange(callback) {
+    this.onChange = callback;
+  }
+
+  emitChange() {
+    if (typeof this.onChange === "function") {
+      this.onChange(this.quad.map(([x, y]) => [x, y]));
+    }
   }
 
   // TODO: hook point for future preview integration, e.g. from /view URL.
@@ -167,6 +242,22 @@ class PTQuadEditor {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     this.draw();
+  }
+
+  bindPointerEvents() {
+    this.canvas.addEventListener("pointerdown", (e) => this.onPointerDown(e));
+    this.canvas.addEventListener("pointermove", (e) => this.onPointerMove(e));
+    this.canvas.addEventListener("pointerup", (e) => this.onPointerUp(e));
+    this.canvas.addEventListener("pointercancel", (e) => this.onPointerCancel(e));
+    this.canvas.addEventListener("lostpointercapture", () => this.stopDrag());
+  }
+
+  getCanvasCoords(event) {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
   }
 
   computeImageRect() {
@@ -229,6 +320,23 @@ class PTQuadEditor {
     return Math.hypot(px - qx, py - qy);
   }
 
+  pointInPolygon(x, y, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+      const xi = polygon[i][0];
+      const yi = polygon[i][1];
+      const xj = polygon[j][0];
+      const yj = polygon[j][1];
+
+      const intersect = ((yi > y) !== (yj > y))
+        && (x < (((xj - xi) * (y - yi)) / ((yj - yi) || 1e-8)) + xi);
+      if (intersect) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
   hitTest(x, y) {
     const handleRadius = 10;
 
@@ -238,6 +346,10 @@ class PTQuadEditor {
       if (Math.hypot(x - hx, y - hy) <= handleRadius) {
         return { type: "handle", index: i };
       }
+    }
+
+    if (this.pointInPolygon(x, y, points)) {
+      return { type: "inside", index: -1 };
     }
 
     const edgeThreshold = 8;
@@ -250,6 +362,101 @@ class PTQuadEditor {
     }
 
     return { type: "none", index: -1 };
+  }
+
+  applyClampedQuad(points) {
+    this.quad = points.map(([x, y]) => [
+      clamp(x, 0, 1),
+      clamp(y, 0, 1),
+    ]);
+  }
+
+  onPointerDown(event) {
+    event.preventDefault();
+
+    const { x, y } = this.getCanvasCoords(event);
+    const hit = this.hitTest(x, y);
+
+    debugLog("pointer events", { phase: "down", hit, x, y });
+
+    this.pointerId = event.pointerId;
+    this.canvas.setPointerCapture(event.pointerId);
+
+    if (hit.type === "handle") {
+      this.dragMode = "handle";
+      this.activeHandle = hit.index;
+      this.dragState = null;
+    } else if (hit.type === "inside") {
+      this.dragMode = "quad";
+      this.activeHandle = -1;
+
+      const [nx, ny] = this.canvasToNorm(x, y);
+      this.dragState = {
+        startNorm: [nx, ny],
+        startQuad: this.quad.map(([qx, qy]) => [qx, qy]),
+      };
+    } else {
+      this.dragMode = null;
+      this.activeHandle = -1;
+      this.dragState = null;
+    }
+
+    this.draw();
+  }
+
+  onPointerMove(event) {
+    const { x, y } = this.getCanvasCoords(event);
+
+    if (this.dragMode && this.pointerId === event.pointerId) {
+      event.preventDefault();
+
+      if (this.dragMode === "handle" && this.activeHandle >= 0) {
+        const [nx, ny] = this.canvasToNorm(x, y);
+        this.quad[this.activeHandle] = [nx, ny];
+        this.emitChange();
+      } else if (this.dragMode === "quad" && this.dragState) {
+        const [nx, ny] = this.canvasToNorm(x, y);
+        const dx = nx - this.dragState.startNorm[0];
+        const dy = ny - this.dragState.startNorm[1];
+
+        const next = this.dragState.startQuad.map(([qx, qy]) => [qx + dx, qy + dy]);
+        this.applyClampedQuad(next);
+        this.emitChange();
+      }
+
+      this.draw();
+      debugLog("pointer events", { phase: "move", dragMode: this.dragMode, x, y });
+      return;
+    }
+
+    const hit = this.hitTest(x, y);
+    this.hoverHandle = hit.type === "handle" ? hit.index : -1;
+    this.draw();
+  }
+
+  stopDrag() {
+    this.dragMode = null;
+    this.dragState = null;
+    this.activeHandle = -1;
+    this.pointerId = null;
+    this.draw();
+  }
+
+  onPointerUp(event) {
+    if (this.pointerId === event.pointerId) {
+      event.preventDefault();
+      this.canvas.releasePointerCapture(event.pointerId);
+      this.stopDrag();
+      debugLog("pointer events", { phase: "up" });
+    }
+  }
+
+  onPointerCancel(event) {
+    if (this.pointerId === event.pointerId) {
+      event.preventDefault();
+      this.stopDrag();
+      debugLog("pointer events", { phase: "cancel" });
+    }
   }
 
   drawCheckerboard() {
@@ -305,9 +512,11 @@ class PTQuadEditor {
 
     points.forEach(([x, y], i) => {
       const isActive = this.activeHandle === i;
+      const isHovered = this.hoverHandle === i;
+
       ctx.beginPath();
       ctx.arc(x, y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = isActive ? "#ffffff" : "#ff6a5f";
+      ctx.fillStyle = isActive ? "#ffffff" : (isHovered ? "#ffe599" : "#ff6a5f");
       ctx.strokeStyle = "rgba(0,0,0,0.85)";
       ctx.lineWidth = 1.5;
       ctx.fill();
@@ -354,17 +563,23 @@ function setupNodes2Widget(node) {
   const ctx = canvas.getContext("2d");
 
   const widget = attachDomWidget(node, container);
+  const quadWidget = ensureQuadWidget(node);
 
   node.__pt_nodes2_dom = {
     container,
     canvas,
     ctx,
     widget,
+    quadWidget,
     resizeObserver: null,
     editor: null,
   };
 
-  node.__pt_nodes2_dom.editor = new PTQuadEditor(node, node.__pt_nodes2_dom);
+  const editor = new PTQuadEditor(node, node.__pt_nodes2_dom);
+  editor.setOnChange((quad) => {
+    writeQuadToWidget(node, quad);
+  });
+  node.__pt_nodes2_dom.editor = editor;
 
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => {
@@ -381,6 +596,7 @@ function setupNodes2Widget(node) {
     id: node.id,
     type: node.type,
     hasWidget: Boolean(widget),
+    hasQuadWidget: Boolean(quadWidget),
   });
 }
 
