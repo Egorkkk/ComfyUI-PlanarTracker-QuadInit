@@ -40,11 +40,8 @@ Example `quad_points_px_json`:
 ## UI Check
 
 After restarting ComfyUI, the node loads a web extension from `web/js/quad_init.js` and adds an interactive quad editor inside the node.
-The backend returns `ui.images` for `debug_image`, and the frontend extension loads that preview manually from the result descriptor.
-The frontend extension draws the preview image first, then draws the quad overlay and handles on top of it.
-The custom `/view?...` preview is the only surface used for quad editing and mouse interaction.
-ComfyUI may also show its standard internal `IMAGE` preview for the same node; this step does not disable or reuse that built-in preview.
-The preview descriptor is primarily picked up from the frontend `api` `executed` event (`ui.images`); if that path is unavailable, the extension falls back to `node.imgs[0]`.
+The node now returns a standard ComfyUI output tuple, and the frontend uses the built-in image preview (`node.imgs[0]`) as the background for the quad overlay.
+The extension draws only the quad overlay and handles on top of the standard preview image inside the node.
 
 Minimal check workflow:
 - `LoadImage -> PTQuadInitNode`

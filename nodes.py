@@ -264,10 +264,7 @@ class PTQuadInitNode:
 
         sam3_box_prompt = json.dumps(sam3_box, separators=(", ", ": "))
         quad_points_px_json = _quad_json_for_output(quad_points_int)
-        return {
-            "ui": {"images": [_save_debug_preview(debug_image)]},
-            "result": (sam3_box_prompt, quad_points_px_json, debug_image),
-        }
+        return (sam3_box_prompt, quad_points_px_json, debug_image)
 
 
 NODE_CLASS_MAPPINGS = {

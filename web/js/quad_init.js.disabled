@@ -1,6 +1,7 @@
 const app = window.comfyAPI?.app?.app || window.app;
 const comfyApi = window.comfyAPI?.api?.api || window.api;
 const DEBUG = false;
+const USE_MANUAL_PREVIEW = true;
 
 const TARGET_NODE = "PTQuadInitNode";
 const STATE_WIDGET = "quad_json";
@@ -67,27 +68,29 @@ function getWidget(node, name) {
 }
 
 function getPreviewImage(node) {
-  const manualImage = node.__pt_preview_img;
-  if (manualImage?.complete) {
-    const width = node.__pt_imgW || manualImage.naturalWidth || manualImage.videoWidth || manualImage.width || null;
-    const height = node.__pt_imgH || manualImage.naturalHeight || manualImage.videoHeight || manualImage.height || null;
-    if (width && height) {
-      return {
-        image: manualImage,
-        width,
-        height,
-        source: "manual",
-      };
+  if (USE_MANUAL_PREVIEW) {
+    const manualImage = node.__pt_preview_img;
+    if (manualImage?.complete) {
+      const width = node.__pt_imgW || manualImage.naturalWidth || manualImage.videoWidth || manualImage.width || null;
+      const height = node.__pt_imgH || manualImage.naturalHeight || manualImage.videoHeight || manualImage.height || null;
+      if (width && height) {
+        return {
+          image: manualImage,
+          width,
+          height,
+          source: "manual",
+        };
+      }
     }
   }
 
-  const fallbackImage = node.imgs?.[0];
-  if (fallbackImage) {
-    const width = fallbackImage.naturalWidth || fallbackImage.videoWidth || fallbackImage.width || null;
-    const height = fallbackImage.naturalHeight || fallbackImage.videoHeight || fallbackImage.height || null;
+  const previewImage = node.imgs?.[0];
+  if (previewImage) {
+    const width = previewImage.naturalWidth || previewImage.videoWidth || previewImage.width || null;
+    const height = previewImage.naturalHeight || previewImage.videoHeight || previewImage.height || null;
     if (width && height) {
       return {
-        image: fallbackImage,
+        image: previewImage,
         width,
         height,
         source: "node.imgs",
@@ -112,35 +115,75 @@ function buildViewUrl(descriptor) {
 }
 
 function extractPreviewDescriptor(message) {
+  if (!USE_MANUAL_PREVIEW) {
+    return null;
+  }
   return extractPreviewDescriptorAny(message);
 }
 
 function extractPreviewDescriptorAny(payload) {
-  const candidates = [
-    payload?.images?.[0],
-    payload?.ui?.images?.[0],
-    payload?.output?.images?.[0],
-    payload?.output?.ui?.images?.[0],
-    payload?.detail?.images?.[0],
-    payload?.detail?.output?.images?.[0],
-    payload?.detail?.output?.ui?.images?.[0],
-    payload?.detail?.ui?.images?.[0],
-    payload?.data?.images?.[0],
-    payload?.data?.output?.images?.[0],
-    payload?.data?.output?.ui?.images?.[0],
-    payload?.data?.ui?.images?.[0],
-    payload?.result?.images?.[0],
-    payload?.result?.ui?.images?.[0],
-    payload?.outputs?.ui?.images?.[0],
-  ];
+  const seen = new Set();
 
-  for (const candidate of candidates) {
-    if (candidate?.filename) {
-      return candidate;
+  function visit(value, depth = 0) {
+    if (!value || depth > 3) {
+      return null;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const match = visit(item, depth + 1);
+        if (match) {
+          return match;
+        }
+      }
+      return null;
+    }
+
+    if (typeof value !== "object") {
+      return null;
+    }
+
+    if (seen.has(value)) {
+      return null;
+    }
+    seen.add(value);
+
+    if (value.filename && "subfolder" in value && "type" in value) {
+      return value;
+    }
+
+    const imageGroups = [];
+    if (Array.isArray(value.images)) {
+      imageGroups.push(value.images);
+    }
+    if (Array.isArray(value.output?.images)) {
+      imageGroups.push(value.output.images);
+    }
+    if (Array.isArray(value.output?.ui?.images)) {
+      imageGroups.push(value.output.ui.images);
+    }
+    if (Array.isArray(value.ui?.images)) {
+      imageGroups.push(value.ui.images);
+    }
+
+    for (const group of imageGroups) {
+      for (const item of group) {
+        const match = visit(item, depth + 1);
+        if (match) {
+          return match;
+        }
+      }
+    }
+
+    for (const nested of Object.values(value)) {
+      const match = visit(nested, depth + 1);
+      if (match) {
+        return match;
+      }
     }
   }
 
-  return null;
+  return visit(payload, 0);
 }
 
 function getPayloadNodeId(payload) {
@@ -196,42 +239,41 @@ function isTargetNode(node) {
   return node.comfyClass === TARGET_NODE || node.type === TARGET_NODE || String(node.type || "").includes(TARGET_NODE);
 }
 
-function hookExecutedListener() {
-  if (window.__PT_QUADINIT_EXECUTED_HOOKED) {
-    return;
-  }
+function collectImageArrayPaths(payload, maxDepth = 2) {
+  const results = [];
+  const seen = new Set();
 
-  if (!comfyApi?.addEventListener) {
-    debugLog("executed-hook-unavailable");
-    return;
-  }
-
-  window.__PT_QUADINIT_EXECUTED_HOOKED = true;
-  comfyApi.addEventListener("executed", (event) => {
-    const payload = event?.detail || event;
-    const nodeId = getPayloadNodeId(payload);
-    const descriptor = extractPreviewDescriptorAny(payload);
-    debugLog("api-executed", {
-      nodeId,
-      payloadKeys: Object.keys(payload || {}),
-      descriptor,
-    });
-
-    if (!descriptor) {
+  function walk(value, path, depth) {
+    if (!value || depth > maxDepth || typeof value !== "object") {
       return;
     }
-
-    const node = getNodeById(nodeId) || findSingleTargetNode();
-    if (!isTargetNode(node)) {
-      debugLog("api-executed-skip", { nodeId, hasNode: Boolean(node) });
+    if (seen.has(value)) {
       return;
     }
+    seen.add(value);
 
-    loadPreviewDescriptor(node, descriptor);
-  });
+    if (Array.isArray(value.images)) {
+      results.push(`${path ? `${path}.` : ""}images`);
+    }
+
+    for (const [key, nested] of Object.entries(value)) {
+      if (!nested || typeof nested !== "object") {
+        continue;
+      }
+      const nextPath = path ? `${path}.${key}` : key;
+      walk(nested, nextPath, depth + 1);
+    }
+  }
+
+  walk(payload, "", 0);
+  return results;
 }
 
 function loadPreviewDescriptor(node, descriptor) {
+  if (!USE_MANUAL_PREVIEW) {
+    return;
+  }
+
   const url = buildViewUrl(descriptor);
   if (!url) {
     debugLog("preview-descriptor-missing-url", { id: node.id, descriptor });
@@ -373,20 +415,22 @@ function computePreviewRect(node) {
     state.imageHeight = imageHeight;
   }
 
-  const titleHeight = LiteGraph?.NODE_TITLE_HEIGHT || 30;
   const widgetHeight = LiteGraph?.NODE_WIDGET_HEIGHT || 20;
   const widgetCount = node.widgets?.length || 0;
-  const sidePadding = 10;
-  const gap = 10;
-  const widgetsBlockHeight = widgetCount > 0 ? (widgetCount * (widgetHeight + 4)) + 8 : 0;
-  const previewBoundsWidth = Math.max(40, (node.size?.[0] || 360) - sidePadding * 2);
-  const maxPreviewHeight = Math.max(120, (node.size?.[1] || 340) - titleHeight - widgetsBlockHeight - gap * 2);
-  const previewBoundsHeight = Math.min(360, maxPreviewHeight);
-  const scale = Math.min(previewBoundsWidth / imageWidth, previewBoundsHeight / imageHeight);
-  const drawWidth = Math.max(1, imageWidth * scale);
-  const drawHeight = Math.max(1, imageHeight * scale);
-  const offsetX = sidePadding + (previewBoundsWidth - drawWidth) / 2;
-  const offsetY = titleHeight + gap + (previewBoundsHeight - drawHeight) / 2;
+  const widgetsAreaH = widgetCount > 0 ? (widgetCount * (widgetHeight + 4)) + 20 : 96;
+  const availableWidth = Math.max(40, node.size?.[0] || 360);
+  const maxPreviewHeight = Math.max(120, (node.size?.[1] || 340) - widgetsAreaH - 10);
+  let drawWidth = availableWidth;
+  let drawHeight = drawWidth * (imageHeight / Math.max(1, imageWidth));
+
+  if (drawHeight > maxPreviewHeight) {
+    drawHeight = maxPreviewHeight;
+    drawWidth = drawHeight * (imageWidth / Math.max(1, imageHeight));
+  }
+
+  const scale = drawWidth / Math.max(1, imageWidth);
+  const offsetX = Math.max(0, (availableWidth - drawWidth) / 2);
+  const offsetY = 0;
 
   const rect = {
     x: offsetX,
@@ -397,6 +441,7 @@ function computePreviewRect(node) {
     imageWidth,
     imageHeight,
     hasPreview: Boolean(preview),
+    widgetsAreaH,
   };
 
   if (state) {
@@ -503,6 +548,30 @@ function drawOverlay(node, ctx) {
     ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
   }
 
+  if (preview && DEBUG && !node.__ptLoggedPreviewRect) {
+    node.__ptLoggedPreviewRect = true;
+    debugLog("preview-rect", {
+      id: node.id,
+      source: preview.source,
+      imgW: preview.width,
+      imgH: preview.height,
+      nodeSize: node.size,
+      rect,
+      widgetsAreaH: rect.widgetsAreaH,
+    });
+  }
+
+  if (preview && DEBUG) {
+    ctx.strokeStyle = "rgba(255, 32, 32, 0.9)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(rect.x, rect.y);
+    ctx.lineTo(rect.x + rect.width, rect.y + rect.height);
+    ctx.moveTo(rect.x + rect.width, rect.y);
+    ctx.lineTo(rect.x, rect.y + rect.height);
+    ctx.stroke();
+  }
+
   ctx.strokeStyle = "rgba(48, 255, 160, 0.95)";
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -556,9 +625,6 @@ function drawOverlay(node, ctx) {
 
 function beginDrag(node, localPos) {
   const state = node.__ptQuadState;
-  if (!getPreviewImage(node)) {
-    return false;
-  }
   const imagePoint = localToImagePoint(node, localPos, false);
   if (!state || !imagePoint) {
     return false;
@@ -703,11 +769,20 @@ function setupNode(node) {
   const originalOnExecuted = node.onExecuted;
   node.onExecuted = function onExecuted(message) {
     const result = originalOnExecuted?.apply(this, arguments);
-    const descriptor = extractPreviewDescriptor(message);
+    const descriptor = extractPreviewDescriptorAny(message) || extractPreviewDescriptorAny(this.images);
     debugLog("onExecuted", {
       id: this.id,
       keys: Object.keys(message || {}),
+      message,
+      imagePaths: collectImageArrayPaths(message, 2),
       descriptor,
+      imgs: this.imgs?.map((img) => ({
+        width: img?.width || null,
+        height: img?.height || null,
+        naturalWidth: img?.naturalWidth || null,
+        naturalHeight: img?.naturalHeight || null,
+      })) || [],
+      images: Array.isArray(this.images) ? this.images : null,
       stateWidget: getWidget(this, STATE_WIDGET)?.name || null,
       outputs: this.outputs?.map((output) => ({ name: output.name, type: output.type })),
     });
@@ -765,7 +840,6 @@ app.registerExtension({
     const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function onNodeCreated() {
       const result = originalOnNodeCreated?.apply(this, arguments);
-      hookExecutedListener();
       setupNode(this);
       return result;
     };
