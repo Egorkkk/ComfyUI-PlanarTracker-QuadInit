@@ -195,8 +195,24 @@ function createDomContainer() {
   canvas.style.display = "block";
   canvas.style.touchAction = "none";
 
+  const resetButton = document.createElement("button");
+  resetButton.type = "button";
+  resetButton.textContent = "Reset";
+  resetButton.style.position = "absolute";
+  resetButton.style.right = "8px";
+  resetButton.style.bottom = "8px";
+  resetButton.style.padding = "2px 8px";
+  resetButton.style.fontSize = "11px";
+  resetButton.style.lineHeight = "1.4";
+  resetButton.style.border = "1px solid rgba(255,255,255,0.25)";
+  resetButton.style.background = "rgba(0,0,0,0.45)";
+  resetButton.style.color = "#fff";
+  resetButton.style.borderRadius = "4px";
+  resetButton.style.cursor = "pointer";
+
   container.appendChild(canvas);
-  return { container, canvas };
+  container.appendChild(resetButton);
+  return { container, canvas, resetButton };
 }
 
 function attachDomWidget(node, container) {
@@ -253,6 +269,7 @@ class PTQuadEditor {
 
     this.onChange = null;
 
+    this.setCursor("crosshair");
     this.bindPointerEvents();
   }
 
@@ -264,6 +281,29 @@ class PTQuadEditor {
     if (typeof this.onChange === "function") {
       this.onChange(this.quad.map(([x, y]) => [x, y]));
     }
+  }
+
+  setCursor(value) {
+    this.canvas.style.cursor = value;
+  }
+
+  updateCursorFromHit(hit) {
+    if (this.dragMode) {
+      this.setCursor("grabbing");
+      return;
+    }
+
+    if (hit?.type === "handle") {
+      this.setCursor("grab");
+      return;
+    }
+
+    if (hit?.type === "inside") {
+      this.setCursor("move");
+      return;
+    }
+
+    this.setCursor("crosshair");
   }
 
   // TODO: hook point for future preview integration, e.g. from /view URL.
@@ -317,6 +357,13 @@ class PTQuadEditor {
     this.canvas.addEventListener("pointerup", (e) => this.onPointerUp(e));
     this.canvas.addEventListener("pointercancel", (e) => this.onPointerCancel(e));
     this.canvas.addEventListener("lostpointercapture", () => this.stopDrag());
+    this.canvas.addEventListener("pointerleave", () => {
+      if (!this.dragMode) {
+        this.hoverHandle = -1;
+        this.setCursor("crosshair");
+        this.draw();
+      }
+    });
   }
 
   getCanvasCoords(event) {
@@ -468,6 +515,7 @@ class PTQuadEditor {
       this.dragState = null;
     }
 
+    this.updateCursorFromHit(hit);
     this.draw();
   }
 
@@ -491,6 +539,7 @@ class PTQuadEditor {
         this.emitChange();
       }
 
+      this.setCursor("grabbing");
       this.draw();
       debugLog("pointer events", { phase: "move", dragMode: this.dragMode, x, y });
       return;
@@ -498,6 +547,7 @@ class PTQuadEditor {
 
     const hit = this.hitTest(x, y);
     this.hoverHandle = hit.type === "handle" ? hit.index : -1;
+    this.updateCursorFromHit(hit);
     this.draw();
   }
 
@@ -506,6 +556,7 @@ class PTQuadEditor {
     this.dragState = null;
     this.activeHandle = -1;
     this.pointerId = null;
+    this.setCursor("crosshair");
     this.draw();
   }
 
@@ -626,7 +677,7 @@ function setupNodes2Widget(node) {
 
   node.__pt_nodes2_setup_done = true;
 
-  const { container, canvas } = createDomContainer();
+  const { container, canvas, resetButton } = createDomContainer();
   const ctx = canvas.getContext("2d");
 
   const widget = attachDomWidget(node, container);
@@ -635,6 +686,7 @@ function setupNodes2Widget(node) {
   node.__pt_nodes2_dom = {
     container,
     canvas,
+    resetButton,
     ctx,
     widget,
     quadWidget,
@@ -649,6 +701,14 @@ function setupNodes2Widget(node) {
   node.__pt_nodes2_dom.editor = editor;
 
   restoreQuadFromWidget(node, editor);
+
+  resetButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    editor.setQuadNormalized(defaultQuadNormalized());
+    editor.emitChange();
+    debugLog("pointer events", { phase: "reset" });
+  });
 
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => {
