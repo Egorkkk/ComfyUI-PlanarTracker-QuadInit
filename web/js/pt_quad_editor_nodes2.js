@@ -22,6 +22,15 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function defaultQuadNormalized() {
+  return [
+    [0.2, 0.2],
+    [0.8, 0.2],
+    [0.8, 0.8],
+    [0.2, 0.8],
+  ];
+}
+
 function matchTargetValue(value) {
   if (!value) {
     return false;
@@ -107,6 +116,69 @@ function writeQuadToWidget(node, quad) {
   }
 }
 
+function normalizeParsedQuad(points) {
+  if (!Array.isArray(points) || points.length !== 4) {
+    return null;
+  }
+
+  let maxAbs = 0;
+  for (const point of points) {
+    if (!Array.isArray(point) || point.length !== 2) {
+      return null;
+    }
+    maxAbs = Math.max(maxAbs, Math.abs(Number(point[0]) || 0), Math.abs(Number(point[1]) || 0));
+  }
+
+  if (maxAbs > 1.000001) {
+    // Legacy pixel format fallback: assume 0..511-ish points.
+    return points.map(([x, y]) => [
+      clamp((Number(x) || 0) / 511.0, 0, 1),
+      clamp((Number(y) || 0) / 511.0, 0, 1),
+    ]);
+  }
+
+  return points.map(([x, y]) => [
+    clamp(Number(x) || 0, 0, 1),
+    clamp(Number(y) || 0, 0, 1),
+  ]);
+}
+
+function parseQuadWidgetValue(rawValue) {
+  if (!rawValue || !String(rawValue).trim()) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue);
+
+    if (Array.isArray(parsed)) {
+      return normalizeParsedQuad(parsed);
+    }
+
+    if (parsed && Array.isArray(parsed.pts)) {
+      return normalizeParsedQuad(parsed.pts);
+    }
+
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function restoreQuadFromWidget(node, editor) {
+  const widget = ensureQuadWidget(node);
+  const rawValue = widget ? String(widget.value ?? "") : "";
+  const restored = parseQuadWidgetValue(rawValue);
+
+  if (restored) {
+    editor.setQuadNormalized(restored);
+    return;
+  }
+
+  editor.setQuadNormalized(defaultQuadNormalized());
+  writeQuadToWidget(node, editor.quad);
+}
+
 function createDomContainer() {
   const container = document.createElement("div");
   container.style.position = "relative";
@@ -171,12 +243,7 @@ class PTQuadEditor {
     this.image = null;
     this.imageRect = { x: 0, y: 0, w: 1, h: 1 };
 
-    this.quad = [
-      [0.2, 0.2],
-      [0.8, 0.2],
-      [0.8, 0.8],
-      [0.2, 0.8],
-    ];
+    this.quad = defaultQuadNormalized();
 
     this.activeHandle = -1;
     this.hoverHandle = -1;
@@ -580,6 +647,8 @@ function setupNodes2Widget(node) {
     writeQuadToWidget(node, quad);
   });
   node.__pt_nodes2_dom.editor = editor;
+
+  restoreQuadFromWidget(node, editor);
 
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => {
