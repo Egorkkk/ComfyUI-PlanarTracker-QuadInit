@@ -6,6 +6,9 @@ const TARGET_DISPLAY = "PT Quad Init";
 const DOM_WIDGET_NAME = "pt_quad_editor_nodes2";
 const DOM_WIDGET_HEIGHT = 240;
 const QUAD_WIDGET_NAME = "quad_json";
+const MIN_EDITOR_HEIGHT = 120;
+const NODE_RESERVED_OFFSET = 96;
+const NODE_WIDGET_GAP = 4;
 
 function debugLog(message, payload = null) {
   if (!DEBUG) {
@@ -670,6 +673,58 @@ function resizeCanvas(node) {
   state.editor.resize(cssWidth, cssHeight, dpr);
 }
 
+function computeEditorHeightFromNode(node) {
+  const nodeHeight = Number(node?.size?.[1]) || 0;
+  const widgetHeight = LiteGraph?.NODE_WIDGET_HEIGHT || 20;
+  const widgets = Array.isArray(node?.widgets) ? node.widgets : [];
+
+  let visibleRows = 0;
+  for (const widget of widgets) {
+    if (!widget) {
+      continue;
+    }
+    if (widget.name === DOM_WIDGET_NAME) {
+      continue;
+    }
+
+    const type = String(widget.type || "");
+    if (type.includes("converted-widget")) {
+      continue;
+    }
+    visibleRows += 1;
+  }
+
+  const reservedByWidgets = visibleRows > 0 ? visibleRows * (widgetHeight + NODE_WIDGET_GAP) : 0;
+  const reserved = NODE_RESERVED_OFFSET + reservedByWidgets;
+  const rawHeight = nodeHeight > 0 ? nodeHeight - reserved : DOM_WIDGET_HEIGHT;
+
+  return Math.max(MIN_EDITOR_HEIGHT, Math.round(rawHeight));
+}
+
+function applyEditorContainerHeight(node) {
+  const state = node.__pt_nodes2_dom;
+  if (!state?.container) {
+    return;
+  }
+
+  const editorHeight = computeEditorHeightFromNode(node);
+  const cssValue = `${editorHeight}px`;
+
+  if (state.container.style.height !== cssValue || state.container.style.minHeight !== cssValue) {
+    state.container.style.height = cssValue;
+    state.container.style.minHeight = cssValue;
+
+    debugLog("node resize", {
+      nodeId: node?.id,
+      nodeHeight: node?.size?.[1],
+      editorHeight,
+    });
+  }
+
+  // Force redraw path even if ResizeObserver misses the size mutation.
+  resizeCanvas(node);
+}
+
 function setupNodes2Widget(node) {
   if (!node || node.__pt_nodes2_setup_done) {
     return;
@@ -710,6 +765,13 @@ function setupNodes2Widget(node) {
     debugLog("pointer events", { phase: "reset" });
   });
 
+  const originalOnResize = node.onResize;
+  node.onResize = function onResize() {
+    const result = originalOnResize?.apply(this, arguments);
+    applyEditorContainerHeight(this);
+    return result;
+  };
+
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => {
       resizeCanvas(node);
@@ -718,8 +780,8 @@ function setupNodes2Widget(node) {
     node.__pt_nodes2_dom.resizeObserver = ro;
   }
 
-  requestAnimationFrame(() => resizeCanvas(node));
-  setTimeout(() => resizeCanvas(node), 50);
+  requestAnimationFrame(() => applyEditorContainerHeight(node));
+  setTimeout(() => applyEditorContainerHeight(node), 50);
 
   debugLog("dom widget created", {
     id: node.id,
