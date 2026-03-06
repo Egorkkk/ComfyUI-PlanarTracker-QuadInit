@@ -214,6 +214,163 @@ function restoreQuadFromWidget(node, editor) {
   }
 }
 
+function isImageDescriptor(value) {
+  return Boolean(value && typeof value === "object" && typeof value.filename === "string");
+}
+
+function firstImageDescriptorInArray(value) {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  return value.find((item) => isImageDescriptor(item)) || null;
+}
+
+function scanObjectValuesForImageDescriptor(obj) {
+  if (!obj || typeof obj !== "object") {
+    return null;
+  }
+  for (const value of Object.values(obj)) {
+    const descriptor = firstImageDescriptorInArray(value);
+    if (descriptor) {
+      return descriptor;
+    }
+  }
+  return null;
+}
+
+function findPreviewImageDescriptor(data) {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  let descriptor = firstImageDescriptorInArray(data.images);
+  if (descriptor) {
+    return descriptor;
+  }
+
+  descriptor = firstImageDescriptorInArray(data.output?.images);
+  if (descriptor) {
+    return descriptor;
+  }
+
+  descriptor = scanObjectValuesForImageDescriptor(data);
+  if (descriptor) {
+    return descriptor;
+  }
+
+  descriptor = scanObjectValuesForImageDescriptor(data.output);
+  if (descriptor) {
+    return descriptor;
+  }
+
+  return null;
+}
+
+function findUpstreamImageNodeId(node) {
+  if (!node || !Array.isArray(node.inputs)) {
+    return null;
+  }
+
+  const imagesInput = node.inputs.find((input) => input?.name === "images");
+  const fallbackInput = node.inputs.find((input) => input && input.link != null);
+  const input = imagesInput || fallbackInput;
+  const linkId = input?.link;
+  if (linkId == null) {
+    return null;
+  }
+
+  const links = node.graph?.links;
+  const link = links?.[linkId] || links?.[String(linkId)];
+  return link?.origin_id ?? link?.originId ?? null;
+}
+
+function getCachedOutputs(nodeId) {
+  if (nodeId == null) {
+    return null;
+  }
+
+  const readById = (obj) => {
+    if (!obj || typeof obj !== "object") {
+      return null;
+    }
+    return obj[nodeId] || obj[String(nodeId)] || null;
+  };
+
+  return readById(app?.nodeOutputs)
+    || readById(app?.graph?.nodeOutputs)
+    || readById(app?.lastNodeOutputs)
+    || null;
+}
+
+function extractImageDescriptorFromCachedOutputs(outputs) {
+  return findPreviewImageDescriptor(outputs);
+}
+
+function buildComfyViewUrl(descriptor) {
+  if (!isImageDescriptor(descriptor)) {
+    return null;
+  }
+  const filename = descriptor.filename;
+  const subfolder = descriptor.subfolder || "";
+  const type = descriptor.type || "output";
+  return `/view?filename=${encodeURIComponent(filename)}&subfolder=${encodeURIComponent(subfolder)}&type=${encodeURIComponent(type)}`;
+}
+
+function extractPreviewImage(node, data) {
+  try {
+    if (!node?.__pt_nodes2_dom?.editor) {
+      return;
+    }
+
+    if (data && typeof data === "object") {
+      debugLog("onExecuted received", Object.keys(data || {}));
+    }
+
+    let descriptor = data && typeof data === "object" ? findPreviewImageDescriptor(data) : null;
+
+    if (!descriptor) {
+      const originId = findUpstreamImageNodeId(node);
+      debugLog("preview upstream origin", { nodeId: node?.id, originId });
+
+      const cachedOutputs = getCachedOutputs(originId);
+      if (cachedOutputs && typeof cachedOutputs === "object") {
+        debugLog("preview cache hit", {
+          originId,
+          keys: Object.keys(cachedOutputs),
+        });
+      } else {
+        debugLog("preview cache miss", { originId });
+      }
+      descriptor = extractImageDescriptorFromCachedOutputs(cachedOutputs);
+    }
+
+    if (!descriptor) {
+      return;
+    }
+
+    debugLog("preview image found", {
+      filename: descriptor.filename,
+      subfolder: descriptor.subfolder || "",
+      type: descriptor.type || "output",
+    });
+
+    const url = buildComfyViewUrl(descriptor);
+    if (!url) {
+      return;
+    }
+    if (node.__pt_nodes2_dom.editor.imageUrl === url) {
+      return;
+    }
+
+    debugLog("preview url", url);
+    node.__pt_nodes2_dom.editor.setImage(url);
+  } catch (error) {
+    if (DEBUG) {
+      console.warn("[PTQuadNodes2] extractPreviewImage failed", error);
+    }
+  }
+}
+
 function createDomContainer() {
   const container = document.createElement("div");
   container.style.position = "relative";
@@ -309,9 +466,11 @@ class PTQuadEditor {
     this.dpr = 1;
 
     this.image = null;
+    this.imageUrl = "";
     this.imageRect = { x: 0, y: 0, w: 1, h: 1 };
 
     this.quad = defaultQuadNormalized();
+    this.lastValidQuad = this.copyQuad(this.quad);
 
     this.activeHandle = -1;
     this.hoverHandle = -1;
@@ -365,16 +524,25 @@ class PTQuadEditor {
   setImage(url) {
     if (!url) {
       this.image = null;
+      this.imageUrl = "";
       this.draw();
       return;
     }
 
+    this.imageUrl = url;
+    const requestedUrl = url;
     const img = new Image();
     img.onload = () => {
+      if (this.imageUrl !== requestedUrl) {
+        return;
+      }
       this.image = img;
       this.draw();
     };
     img.onerror = () => {
+      if (this.imageUrl !== requestedUrl) {
+        return;
+      }
       this.image = null;
       this.draw();
     };
@@ -385,15 +553,23 @@ class PTQuadEditor {
     return this.quad.map(([x, y]) => [x, y]);
   }
 
+  copyQuad(points) {
+    return points.map(([x, y]) => [x, y]);
+  }
+
   setNormalizedQuad(points) {
     if (!Array.isArray(points) || points.length !== 4) {
       return;
     }
 
-    this.quad = points.map(([x, y]) => [
+    const next = points.map(([x, y]) => [
       clamp(Number(x) || 0, 0, 1),
       clamp(Number(y) || 0, 0, 1),
     ]);
+    this.quad = next;
+    if (this.isValidQuad(next)) {
+      this.lastValidQuad = this.copyQuad(next);
+    }
 
     this.draw();
   }
@@ -413,6 +589,7 @@ class PTQuadEditor {
 
   restoreFromNodeWidget() {
     restoreQuadFromWidget(this.node, this);
+    this.lastValidQuad = this.copyQuad(this.quad);
   }
 
   markChanged() {
@@ -584,6 +761,135 @@ class PTQuadEditor {
     ]);
   }
 
+  pointsEqual(a, b, eps = 1e-6) {
+    return Math.abs(a[0] - b[0]) <= eps && Math.abs(a[1] - b[1]) <= eps;
+  }
+
+  cross(a, b, c) {
+    return ((b[0] - a[0]) * (c[1] - a[1])) - ((b[1] - a[1]) * (c[0] - a[0]));
+  }
+
+  pointOnSegment(a, b, p, eps = 1e-8) {
+    if (Math.abs(this.cross(a, b, p)) > eps) {
+      return false;
+    }
+    const minX = Math.min(a[0], b[0]) - eps;
+    const maxX = Math.max(a[0], b[0]) + eps;
+    const minY = Math.min(a[1], b[1]) - eps;
+    const maxY = Math.max(a[1], b[1]) + eps;
+    return p[0] >= minX && p[0] <= maxX && p[1] >= minY && p[1] <= maxY;
+  }
+
+  orientationSign(value, eps = 1e-8) {
+    if (Math.abs(value) <= eps) {
+      return 0;
+    }
+    return value > 0 ? 1 : -1;
+  }
+
+  segmentsIntersect(a, b, c, d) {
+    const eps = 1e-8;
+
+    // Exclude touching at shared endpoints.
+    if (
+      this.pointsEqual(a, c, eps)
+      || this.pointsEqual(a, d, eps)
+      || this.pointsEqual(b, c, eps)
+      || this.pointsEqual(b, d, eps)
+    ) {
+      return false;
+    }
+
+    const o1 = this.cross(a, b, c);
+    const o2 = this.cross(a, b, d);
+    const o3 = this.cross(c, d, a);
+    const o4 = this.cross(c, d, b);
+    const s1 = this.orientationSign(o1, eps);
+    const s2 = this.orientationSign(o2, eps);
+    const s3 = this.orientationSign(o3, eps);
+    const s4 = this.orientationSign(o4, eps);
+
+    if (s1 * s2 < 0 && s3 * s4 < 0) {
+      return true;
+    }
+    if (s1 === 0 && this.pointOnSegment(a, b, c, eps)) {
+      return true;
+    }
+    if (s2 === 0 && this.pointOnSegment(a, b, d, eps)) {
+      return true;
+    }
+    if (s3 === 0 && this.pointOnSegment(c, d, a, eps)) {
+      return true;
+    }
+    if (s4 === 0 && this.pointOnSegment(c, d, b, eps)) {
+      return true;
+    }
+    return false;
+  }
+
+  isSelfIntersecting(pts) {
+    if (!Array.isArray(pts) || pts.length !== 4) {
+      return true;
+    }
+    return this.segmentsIntersect(pts[0], pts[1], pts[2], pts[3])
+      || this.segmentsIntersect(pts[1], pts[2], pts[3], pts[0]);
+  }
+
+  isConvexQuad(pts) {
+    if (!Array.isArray(pts) || pts.length !== 4) {
+      return false;
+    }
+
+    const eps = 1e-8;
+    let sign = 0;
+    let nonZeroCount = 0;
+
+    for (let i = 0; i < 4; i += 1) {
+      const a = pts[i];
+      const b = pts[(i + 1) % 4];
+      const c = pts[(i + 2) % 4];
+      const value = this.cross(a, b, c);
+      const s = this.orientationSign(value, eps);
+      if (s === 0) {
+        continue;
+      }
+      nonZeroCount += 1;
+      if (sign === 0) {
+        sign = s;
+      } else if (sign !== s) {
+        return false;
+      }
+    }
+
+    return nonZeroCount >= 3;
+  }
+
+  isValidQuad(pts) {
+    return !this.isSelfIntersecting(pts) && this.isConvexQuad(pts);
+  }
+
+  finishPointerInteraction() {
+    const hadDrag = Boolean(this.dragMode);
+    if (!hadDrag) {
+      this.stopDrag();
+      return;
+    }
+
+    if (this.isValidQuad(this.quad)) {
+      this.lastValidQuad = this.copyQuad(this.quad);
+    } else {
+      if (DEBUG) {
+        console.warn("[PTQuadNodes2] Invalid quad (concave/self-intersecting) — reverting");
+      }
+      this.quad = this.copyQuad(this.lastValidQuad);
+    }
+
+    this.stopDrag();
+    this.syncToNodeWidget();
+    this.markChanged();
+    this.draw();
+  }
+
   onPointerDown(event) {
     event.preventDefault();
 
@@ -613,6 +919,10 @@ class PTQuadEditor {
       this.dragMode = null;
       this.activeHandle = -1;
       this.dragState = null;
+    }
+
+    if (this.dragMode) {
+      this.lastValidQuad = this.copyQuad(this.quad);
     }
 
     this.updateCursorFromHit(hit);
@@ -678,7 +988,7 @@ class PTQuadEditor {
       this.canvas.releasePointerCapture(event.pointerId);
       const { x, y } = this.getCanvasCoords(event);
       this.pointerDebugPos = { x, y };
-      this.stopDrag();
+      this.finishPointerInteraction();
       debugLog("pointer events", { phase: "up" });
     }
   }
@@ -686,7 +996,7 @@ class PTQuadEditor {
   onPointerCancel(event) {
     if (this.pointerId === event.pointerId) {
       event.preventDefault();
-      this.stopDrag();
+      this.finishPointerInteraction();
       debugLog("pointer events", { phase: "cancel" });
     }
   }
@@ -754,6 +1064,17 @@ class PTQuadEditor {
       ctx.fill();
       ctx.stroke();
     });
+
+    // Visual centroid marker (mean of 4 quad vertices).
+    const centroidX = points.reduce((sum, p) => sum + p[0], 0) / 4;
+    const centroidY = points.reduce((sum, p) => sum + p[1], 0) / 4;
+    ctx.beginPath();
+    ctx.arc(centroidX, centroidY, 5, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(70,150,255,0.98)";
+    ctx.strokeStyle = "rgba(0,0,0,0.7)";
+    ctx.lineWidth = 1.25;
+    ctx.fill();
+    ctx.stroke();
 
     ctx.restore();
   }
@@ -830,12 +1151,16 @@ function setupNodes2Widget(node) {
   node.__pt_nodes2_dom.editor = editor;
 
   editor.restoreFromNodeWidget();
+  extractPreviewImage(node, null);
 
   resetButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    editor.setQuadNormalized(defaultQuadNormalized());
-    editor.emitChange();
+    editor.setNormalizedQuad(defaultQuadNormalized());
+    editor.lastValidQuad = editor.copyQuad(editor.getNormalizedQuad());
+    editor.syncToNodeWidget();
+    editor.markChanged();
+    editor.draw();
     debugLog("pointer events", { phase: "reset" });
   });
 
@@ -900,6 +1225,24 @@ if (app) {
         const result = originalOnNodeCreated?.apply(this, arguments);
         if (isTargetNodeInstance(this) || isTargetNodeData(nodeData)) {
           setupNodes2Widget(this);
+        }
+        return result;
+      };
+
+      const originalOnExecuted = nodeType.prototype.onExecuted;
+      nodeType.prototype.onExecuted = function onExecuted(data) {
+        const result = originalOnExecuted?.apply(this, arguments);
+        if (this?.__pt_nodes2_dom?.editor) {
+          extractPreviewImage(this, data);
+        }
+        return result;
+      };
+
+      const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+      nodeType.prototype.onConnectionsChange = function onConnectionsChange() {
+        const result = originalOnConnectionsChange?.apply(this, arguments);
+        if (this?.__pt_nodes2_dom?.editor) {
+          extractPreviewImage(this, null);
         }
         return result;
       };
