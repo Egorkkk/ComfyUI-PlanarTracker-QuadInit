@@ -471,6 +471,7 @@ class PTQuadEditor {
 
     this.quad = defaultQuadNormalized();
     this.lastValidQuad = this.copyQuad(this.quad);
+    this.committedBBox = this.computePaddedBBoxFromQuad(this.quad);
 
     this.activeHandle = -1;
     this.hoverHandle = -1;
@@ -557,6 +558,110 @@ class PTQuadEditor {
     return points.map(([x, y]) => [x, y]);
   }
 
+  computeBBoxFromQuad(points) {
+    if (!Array.isArray(points) || points.length !== 4) {
+      return null;
+    }
+    const xs = points.map((p) => clamp(Number(p?.[0]) || 0, 0, 1));
+    const ys = points.map((p) => clamp(Number(p?.[1]) || 0, 0, 1));
+    return {
+      x1: Math.min(...xs),
+      y1: Math.min(...ys),
+      x2: Math.max(...xs),
+      y2: Math.max(...ys),
+    };
+  }
+
+  getCurrentBBoxPadPx() {
+    const padWidget = this.node?.widgets?.find((w) => w?.name === "sam3_bbox_pad_px") || null;
+    if (!padWidget) {
+      return 5;
+    }
+    const value = Number(padWidget.value);
+    if (!Number.isFinite(value)) {
+      return 5;
+    }
+    return clamp(Math.round(value), 0, 50);
+  }
+
+  getBBoxImageSize() {
+    const naturalW = Number(this.image?.naturalWidth);
+    const naturalH = Number(this.image?.naturalHeight);
+    if (Number.isFinite(naturalW) && naturalW > 0 && Number.isFinite(naturalH) && naturalH > 0) {
+      return {
+        width: Math.max(1, Math.round(naturalW)),
+        height: Math.max(1, Math.round(naturalH)),
+      };
+    }
+
+    return {
+      width: Math.max(1, Math.round(this.width || DOM_WIDGET_WIDTH)),
+      height: Math.max(1, Math.round(this.height || DOM_WIDGET_HEIGHT)),
+    };
+  }
+
+  expandBBoxPxNormalized(bbox, padPx) {
+    if (!bbox) {
+      return null;
+    }
+
+    const { width, height } = this.getBBoxImageSize();
+    const maxX = Math.max(width - 1, 0);
+    const maxY = Math.max(height - 1, 0);
+
+    const left = clamp(Math.round(clamp(bbox.x1, 0, 1) * maxX), 0, maxX);
+    const top = clamp(Math.round(clamp(bbox.y1, 0, 1) * maxY), 0, maxY);
+    const right = clamp(Math.round(clamp(bbox.x2, 0, 1) * maxX), 0, maxX);
+    const bottom = clamp(Math.round(clamp(bbox.y2, 0, 1) * maxY), 0, maxY);
+
+    let x1 = left;
+    let y1 = top;
+    let x2 = Math.min(right + 1, width);
+    let y2 = Math.min(bottom + 1, height);
+
+    const minW = Math.min(2, Math.max(width, 1));
+    const minH = Math.min(2, Math.max(height, 1));
+    if ((x2 - x1) < minW) {
+      x2 = Math.min(width, x1 + minW);
+      x1 = Math.max(0, x2 - minW);
+    }
+    if ((y2 - y1) < minH) {
+      y2 = Math.min(height, y1 + minH);
+      y1 = Math.max(0, y2 - minH);
+    }
+
+    const safePad = Math.max(0, Math.round(Number(padPx) || 0));
+    const inclusiveRight = Math.max(x1, x2 - 1);
+    const inclusiveBottom = Math.max(y1, y2 - 1);
+
+    let paddedX1 = clamp(x1 - safePad, 0, maxX);
+    let paddedY1 = clamp(y1 - safePad, 0, maxY);
+    let paddedRight = clamp(inclusiveRight + safePad, 0, maxX);
+    let paddedBottom = clamp(inclusiveBottom + safePad, 0, maxY);
+
+    if (paddedRight < paddedX1) {
+      paddedRight = paddedX1;
+    }
+    if (paddedBottom < paddedY1) {
+      paddedBottom = paddedY1;
+    }
+
+    const paddedX2 = Math.min(paddedRight + 1, width);
+    const paddedY2 = Math.min(paddedBottom + 1, height);
+
+    return {
+      x1: clamp(paddedX1 / width, 0, 1),
+      y1: clamp(paddedY1 / height, 0, 1),
+      x2: clamp(paddedX2 / width, 0, 1),
+      y2: clamp(paddedY2 / height, 0, 1),
+    };
+  }
+
+  computePaddedBBoxFromQuad(points) {
+    const rawBBox = this.computeBBoxFromQuad(points);
+    return this.expandBBoxPxNormalized(rawBBox, this.getCurrentBBoxPadPx());
+  }
+
   setNormalizedQuad(points) {
     if (!Array.isArray(points) || points.length !== 4) {
       return;
@@ -590,6 +695,8 @@ class PTQuadEditor {
   restoreFromNodeWidget() {
     restoreQuadFromWidget(this.node, this);
     this.lastValidQuad = this.copyQuad(this.quad);
+    this.committedBBox = this.computePaddedBBoxFromQuad(this.quad);
+    this.draw();
   }
 
   markChanged() {
@@ -884,6 +991,7 @@ class PTQuadEditor {
       this.quad = this.copyQuad(this.lastValidQuad);
     }
 
+    this.committedBBox = this.computePaddedBBoxFromQuad(this.quad);
     this.stopDrag();
     this.syncToNodeWidget();
     this.markChanged();
@@ -1031,6 +1139,25 @@ class PTQuadEditor {
     ctx.strokeRect(0.5, 0.5, this.width - 1, this.height - 1);
   }
 
+  drawCommittedBBox() {
+    const bbox = this.committedBBox;
+    if (!bbox) {
+      return;
+    }
+
+    const r = this.imageRect;
+    const x = r.x + (bbox.x1 * r.w);
+    const y = r.y + (bbox.y1 * r.h);
+    const w = Math.max(0, (bbox.x2 - bbox.x1) * r.w);
+    const h = Math.max(0, (bbox.y2 - bbox.y1) * r.h);
+
+    this.ctx.save();
+    this.ctx.strokeStyle = "rgba(255, 230, 120, 0.95)";
+    this.ctx.lineWidth = 1.5;
+    this.ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1, w - 1), Math.max(1, h - 1));
+    this.ctx.restore();
+  }
+
   drawQuad() {
     const { ctx } = this;
     const points = this.quad.map((p) => this.normToCanvas(p));
@@ -1084,6 +1211,7 @@ class PTQuadEditor {
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.drawCheckerboard();
     this.drawImageAndFrame();
+    this.drawCommittedBBox();
     this.drawQuad();
 
     if (DEBUG && this.pointerDebugPos) {
@@ -1145,9 +1273,6 @@ function setupNodes2Widget(node) {
   };
 
   const editor = new PTQuadEditor(node, node.__pt_nodes2_dom);
-  editor.setOnChange(() => {
-    editor.syncToNodeWidget();
-  });
   node.__pt_nodes2_dom.editor = editor;
 
   editor.restoreFromNodeWidget();
@@ -1158,6 +1283,7 @@ function setupNodes2Widget(node) {
     event.stopPropagation();
     editor.setNormalizedQuad(defaultQuadNormalized());
     editor.lastValidQuad = editor.copyQuad(editor.getNormalizedQuad());
+    editor.committedBBox = editor.computePaddedBBoxFromQuad(editor.getNormalizedQuad());
     editor.syncToNodeWidget();
     editor.markChanged();
     editor.draw();

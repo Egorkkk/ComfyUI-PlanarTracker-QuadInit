@@ -303,6 +303,7 @@ class PTQuadInitNode:
                         "multiline": False,
                     },
                 ),
+                "sam3_bbox_pad_px": ("INT", {"default": 5, "min": 0, "max": 50, "step": 1}),
                 "enforce_convex": ("BOOLEAN", {"default": True}),
                 "clamp_to_image": ("BOOLEAN", {"default": True}),
             }
@@ -312,12 +313,12 @@ class PTQuadInitNode:
     RETURN_NAMES = ("sam3_boxes_prompt", "quad_points_px_json", "debug_image")
     FUNCTION = "build_prompt"
     CATEGORY = "PlanarTracker"
-    SAM3_BBOX_PAD_PX = 5
 
     def build_prompt(
         self,
         image: torch.Tensor,
         quad_json: str,
+        sam3_bbox_pad_px: int = 5,
         enforce_convex: bool = True,
         clamp_to_image: bool = True,
     ):
@@ -346,12 +347,12 @@ class PTQuadInitNode:
 
         quad_points_int = clamp_and_round_px(ordered_points, width, height)
         aabb = aabb_from_quad(quad_points_int, width, height)
-        sam3_aabb = expand_bbox_px(aabb, self.SAM3_BBOX_PAD_PX, width, height)
-        _debug_quad(f"sam3_aabb original={aabb} padded={sam3_aabb} pad_px={self.SAM3_BBOX_PAD_PX}")
+        sam3_aabb = expand_bbox_px(aabb, sam3_bbox_pad_px, width, height)
+        _debug_quad(f"sam3_aabb original={aabb} padded={sam3_aabb} pad_px={sam3_bbox_pad_px}")
         sam3_box = sam3_box_from_aabb(*sam3_aabb, width=width, height=height)
         sam3_boxes_prompt = sam3_boxes_prompt_from_box(sam3_box)
         _debug_quad(f"sam3_boxes_prompt output={sam3_boxes_prompt}")
-        debug_image = draw_debug(base_frame, quad_points_int, aabb)
+        debug_image = draw_debug(base_frame, quad_points_int, sam3_aabb)
 
         quad_points_px_json = _quad_json_for_output(quad_points_int)
         return (sam3_boxes_prompt, quad_points_px_json, debug_image)
