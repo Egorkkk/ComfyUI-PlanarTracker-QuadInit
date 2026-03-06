@@ -240,6 +240,17 @@ def sam3_box_from_aabb(x1: int, y1: int, x2: int, y2: int, width: int, height: i
     }
 
 
+def sam3_prompt_from_box(sam3_box: dict, sam3_format: str) -> str:
+    if sam3_format == "boxes_labels":
+        payload = {
+            "boxes": [sam3_box["box"]],
+            "labels": [bool(sam3_box.get("label", True))],
+        }
+    else:
+        payload = sam3_box
+    return json.dumps(payload, separators=(", ", ": "))
+
+
 def draw_debug(image: torch.Tensor, quad_points_int: Sequence[IntPoint], aabb: Tuple[int, int, int, int]) -> torch.Tensor:
     array = image.detach().cpu().numpy()
     array = np.clip(array * 255.0, 0.0, 255.0).astype(np.uint8)
@@ -300,6 +311,7 @@ class PTQuadInitNode:
                         "multiline": False,
                     },
                 ),
+                "sam3_format": (["single", "boxes_labels"], {"default": "single"}),
                 "enforce_convex": ("BOOLEAN", {"default": True}),
                 "clamp_to_image": ("BOOLEAN", {"default": True}),
             }
@@ -311,7 +323,14 @@ class PTQuadInitNode:
     CATEGORY = "PlanarTracker"
     SAM3_BBOX_PAD_PX = 5
 
-    def build_prompt(self, image: torch.Tensor, quad_json: str, enforce_convex: bool = True, clamp_to_image: bool = True):
+    def build_prompt(
+        self,
+        image: torch.Tensor,
+        quad_json: str,
+        sam3_format: str = "single",
+        enforce_convex: bool = True,
+        clamp_to_image: bool = True,
+    ):
         if image.ndim != 4:
             raise ValueError(f"Expected IMAGE tensor with shape [N,H,W,C], got shape {tuple(image.shape)}")
         if image.shape[0] != 1:
@@ -340,9 +359,13 @@ class PTQuadInitNode:
         sam3_aabb = expand_bbox_px(aabb, self.SAM3_BBOX_PAD_PX, width, height)
         _debug_quad(f"sam3_aabb original={aabb} padded={sam3_aabb} pad_px={self.SAM3_BBOX_PAD_PX}")
         sam3_box = sam3_box_from_aabb(*sam3_aabb, width=width, height=height)
+        if sam3_format not in {"single", "boxes_labels"}:
+            _debug_quad(f"unsupported sam3_format={sam3_format!r}; falling back to 'single'")
+            sam3_format = "single"
+        _debug_quad(f"sam3_format output={sam3_format}")
         debug_image = draw_debug(base_frame, quad_points_int, aabb)
 
-        sam3_box_prompt = json.dumps(sam3_box, separators=(", ", ": "))
+        sam3_box_prompt = sam3_prompt_from_box(sam3_box, sam3_format)
         quad_points_px_json = _quad_json_for_output(quad_points_int)
         return (sam3_box_prompt, quad_points_px_json, debug_image)
 
