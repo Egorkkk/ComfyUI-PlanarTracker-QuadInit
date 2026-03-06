@@ -12,20 +12,69 @@ from PIL import Image, ImageDraw
 
 Point = Tuple[float, float]
 IntPoint = Tuple[int, int]
+PT_QUAD_DEBUG = os.getenv("PT_QUAD_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def parse_quad_json(s: str) -> List[Point]:
-    raw = json.loads(s)
-    if not isinstance(raw, list) or len(raw) != 4:
-        raise ValueError("quad_json must be a JSON array of 4 points")
+def _debug_quad(message: str) -> None:
+    if PT_QUAD_DEBUG:
+        print(f"[PTQuadInitNode] {message}")
+
+
+def _parse_points_array(raw_points: object) -> List[Point]:
+    if not isinstance(raw_points, list) or len(raw_points) != 4:
+        raise ValueError("quad_json points must contain exactly 4 points")
 
     points: List[Point] = []
-    for item in raw:
+    for item in raw_points:
         if not isinstance(item, (list, tuple)) or len(item) != 2:
             raise ValueError("Each quad point must be [x, y]")
         x, y = item
         points.append((float(x), float(y)))
     return points
+
+
+def _convert_norm_to_px(points_norm: Sequence[Point], width: int, height: int) -> List[Point]:
+    max_x = max(width - 1, 0)
+    max_y = max(height - 1, 0)
+    return [
+        (_clamp_unit(x) * float(max_x), _clamp_unit(y) * float(max_y))
+        for x, y in points_norm
+    ]
+
+
+def _looks_normalized(points: Sequence[Point], tolerance: float = 1.5) -> bool:
+    return all((-tolerance <= x <= tolerance) and (-tolerance <= y <= tolerance) for x, y in points)
+
+
+def parse_quad_json(s: str, width: int, height: int) -> List[Point]:
+    raw = json.loads(s)
+
+    # Legacy format: [[x_px, y_px], ...]
+    if isinstance(raw, list):
+        points_px = _parse_points_array(raw)
+        _debug_quad("quad_json format=legacy_list_px conversion=none")
+        return points_px
+
+    # New format: {"pts": [[x,y],...], "space": "norm|px"(optional)}
+    if isinstance(raw, dict):
+        points = _parse_points_array(raw.get("pts"))
+
+        space = str(raw.get("space", "")).strip().lower()
+        if space in {"norm", "normalized", "unit"}:
+            _debug_quad("quad_json format=object_pts conversion=norm_to_px (forced)")
+            return _convert_norm_to_px(points, width, height)
+        if space in {"px", "pixel", "pixels"}:
+            _debug_quad("quad_json format=object_pts conversion=none (forced_px)")
+            return points
+
+        if _looks_normalized(points):
+            _debug_quad("quad_json format=object_pts conversion=norm_to_px (auto)")
+            return _convert_norm_to_px(points, width, height)
+
+        _debug_quad("quad_json format=object_pts conversion=none (auto_px)")
+        return points
+
+    raise ValueError("quad_json must be either [points] or {'pts':[points]}")
 
 
 def default_center_quad(width: int, height: int) -> List[Point]:
@@ -148,6 +197,33 @@ def aabb_from_quad(points_int: Sequence[IntPoint], width: int, height: int) -> T
     return (x1, y1, x2, y2)
 
 
+def expand_bbox_px(bbox: Tuple[int, int, int, int], pad_px: int, width: int, height: int) -> Tuple[int, int, int, int]:
+    x1, y1, x2, y2 = bbox
+    if pad_px <= 0:
+        return (x1, y1, x2, y2)
+
+    max_x = max(width - 1, 0)
+    max_y = max(height - 1, 0)
+
+    # AABB is half-open [x1, y1, x2, y2), so expand right/bottom in inclusive pixel space.
+    right = max(x1, x2 - 1)
+    bottom = max(y1, y2 - 1)
+
+    padded_x1 = min(max(x1 - pad_px, 0), max_x)
+    padded_y1 = min(max(y1 - pad_px, 0), max_y)
+    padded_right = min(max(right + pad_px, 0), max_x)
+    padded_bottom = min(max(bottom + pad_px, 0), max_y)
+
+    if padded_right < padded_x1:
+        padded_right = padded_x1
+    if padded_bottom < padded_y1:
+        padded_bottom = padded_y1
+
+    padded_x2 = min(padded_right + 1, width)
+    padded_y2 = min(padded_bottom + 1, height)
+    return (padded_x1, padded_y1, padded_x2, padded_y2)
+
+
 def _clamp_unit(value: float) -> float:
     return max(0.0, min(1.0, value))
 
@@ -233,6 +309,7 @@ class PTQuadInitNode:
     RETURN_NAMES = ("sam3_box_prompt", "quad_points_px_json", "debug_image")
     FUNCTION = "build_prompt"
     CATEGORY = "PlanarTracker"
+    SAM3_BBOX_PAD_PX = 5
 
     def build_prompt(self, image: torch.Tensor, quad_json: str, enforce_convex: bool = True, clamp_to_image: bool = True):
         if image.ndim != 4:
@@ -247,8 +324,9 @@ class PTQuadInitNode:
         base_frame = image[0, :, :, :3]
 
         try:
-            raw_points = parse_quad_json(quad_json) if quad_json.strip() else default_center_quad(width, height)
-        except Exception:
+            raw_points = parse_quad_json(quad_json, width, height) if quad_json.strip() else default_center_quad(width, height)
+        except Exception as error:
+            _debug_quad(f"quad_json parse failed: {error!r}; using default center quad")
             raw_points = default_center_quad(width, height)
 
         ordered_points = normalize_order_tl_tr_br_bl(raw_points)
@@ -259,7 +337,9 @@ class PTQuadInitNode:
 
         quad_points_int = clamp_and_round_px(ordered_points, width, height)
         aabb = aabb_from_quad(quad_points_int, width, height)
-        sam3_box = sam3_box_from_aabb(*aabb, width=width, height=height)
+        sam3_aabb = expand_bbox_px(aabb, self.SAM3_BBOX_PAD_PX, width, height)
+        _debug_quad(f"sam3_aabb original={aabb} padded={sam3_aabb} pad_px={self.SAM3_BBOX_PAD_PX}")
+        sam3_box = sam3_box_from_aabb(*sam3_aabb, width=width, height=height)
         debug_image = draw_debug(base_frame, quad_points_int, aabb)
 
         sam3_box_prompt = json.dumps(sam3_box, separators=(", ", ": "))
