@@ -228,27 +228,19 @@ def _clamp_unit(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
-def sam3_box_from_aabb(x1: int, y1: int, x2: int, y2: int, width: int, height: int) -> dict:
+def sam3_box_from_aabb(x1: int, y1: int, x2: int, y2: int, width: int, height: int) -> List[float]:
     cx = _clamp_unit(((x1 + x2) / 2.0) / float(width))
     cy = _clamp_unit(((y1 + y2) / 2.0) / float(height))
     box_w = _clamp_unit((x2 - x1) / float(width))
     box_h = _clamp_unit((y2 - y1) / float(height))
+    return [cx, cy, box_w, box_h]
 
+
+def sam3_boxes_prompt_from_box(sam3_box: Sequence[float]) -> dict:
     return {
-        "box": [round(cx, 2), round(cy, 2), round(box_w, 2), round(box_h, 2)],
-        "label": True,
+        "boxes": [list(sam3_box)],
+        "labels": [True],
     }
-
-
-def sam3_prompt_from_box(sam3_box: dict, sam3_format: str) -> str:
-    if sam3_format == "boxes_labels":
-        payload = {
-            "boxes": [sam3_box["box"]],
-            "labels": [bool(sam3_box.get("label", True))],
-        }
-    else:
-        payload = sam3_box
-    return json.dumps(payload, separators=(", ", ": "))
 
 
 def draw_debug(image: torch.Tensor, quad_points_int: Sequence[IntPoint], aabb: Tuple[int, int, int, int]) -> torch.Tensor:
@@ -311,14 +303,13 @@ class PTQuadInitNode:
                         "multiline": False,
                     },
                 ),
-                "sam3_format": (["single", "boxes_labels"], {"default": "single"}),
                 "enforce_convex": ("BOOLEAN", {"default": True}),
                 "clamp_to_image": ("BOOLEAN", {"default": True}),
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "IMAGE")
-    RETURN_NAMES = ("sam3_box_prompt", "quad_points_px_json", "debug_image")
+    RETURN_TYPES = ("SAM3_BOXES_PROMPT", "STRING", "IMAGE")
+    RETURN_NAMES = ("sam3_boxes_prompt", "quad_points_px_json", "debug_image")
     FUNCTION = "build_prompt"
     CATEGORY = "PlanarTracker"
     SAM3_BBOX_PAD_PX = 5
@@ -327,7 +318,6 @@ class PTQuadInitNode:
         self,
         image: torch.Tensor,
         quad_json: str,
-        sam3_format: str = "single",
         enforce_convex: bool = True,
         clamp_to_image: bool = True,
     ):
@@ -359,15 +349,12 @@ class PTQuadInitNode:
         sam3_aabb = expand_bbox_px(aabb, self.SAM3_BBOX_PAD_PX, width, height)
         _debug_quad(f"sam3_aabb original={aabb} padded={sam3_aabb} pad_px={self.SAM3_BBOX_PAD_PX}")
         sam3_box = sam3_box_from_aabb(*sam3_aabb, width=width, height=height)
-        if sam3_format not in {"single", "boxes_labels"}:
-            _debug_quad(f"unsupported sam3_format={sam3_format!r}; falling back to 'single'")
-            sam3_format = "single"
-        _debug_quad(f"sam3_format output={sam3_format}")
+        sam3_boxes_prompt = sam3_boxes_prompt_from_box(sam3_box)
+        _debug_quad(f"sam3_boxes_prompt output={sam3_boxes_prompt}")
         debug_image = draw_debug(base_frame, quad_points_int, aabb)
 
-        sam3_box_prompt = sam3_prompt_from_box(sam3_box, sam3_format)
         quad_points_px_json = _quad_json_for_output(quad_points_int)
-        return (sam3_box_prompt, quad_points_px_json, debug_image)
+        return (sam3_boxes_prompt, quad_points_px_json, debug_image)
 
 
 NODE_CLASS_MAPPINGS = {
